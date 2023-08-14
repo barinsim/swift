@@ -31,10 +31,17 @@ class ExpressionTypeReader {
   //  - Offset of printed expression type inside printedType
   //  - Offset of the first conforming protocol in the protocol buffer
   //  - Number of conforming protocols
-  CompactArrayReader<unsigned, unsigned, unsigned, unsigned, unsigned> entryReader;
+  //
+  //
+  CompactArrayReader<unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
+                     unsigned>
+      entryReader;
 
   // Offsets inside printedType where a protocol name starts.
   CompactArrayReader<unsigned> protoReader;
+
+  //
+  CompactArrayReader<unsigned> altTyReader;
 
   static uint64_t getHeaderValue(char *buffer, unsigned index) {
     uint64_t headerField;
@@ -43,9 +50,10 @@ class ExpressionTypeReader {
   }
 
 public:
-  ExpressionTypeReader(char *buffer):
-      entryReader(buffer + getHeaderValue(buffer, 0)),
-      protoReader(buffer + getHeaderValue(buffer, 2)) {
+  ExpressionTypeReader(char *buffer)
+      : entryReader(buffer + getHeaderValue(buffer, 0)),
+        protoReader(buffer + getHeaderValue(buffer, 2)),
+        altTyReader(buffer + getHeaderValue(buffer, 3)) {
     // Read the printed type string buffer here.
     CompactArrayReader<const char*> reader(buffer + getHeaderValue(buffer, 1));
     reader.readEntries(0, printedType);
@@ -55,12 +63,17 @@ public:
 
   ExpressionType getExpression(uint64_t idx) {
     ExpressionType result;
-    unsigned protoStart, protoCount;
+    unsigned protoStart, protoCount, altTyStart, altTyCount;
     entryReader.readEntries(idx, result.ExprOffset, result.ExprLength,
-                            result.TypeOffset, protoStart, protoCount);
+                            result.TypeOffset, protoStart, protoCount,
+                            altTyStart, altTyCount);
     for (unsigned i = protoStart, n = protoStart + protoCount; i < n; i ++) {
       result.ProtocolOffsets.emplace_back();
       protoReader.readEntries(i, result.ProtocolOffsets.back());
+    }
+    for (unsigned i = altTyStart, n = altTyStart + altTyCount; i < n; i++) {
+      result.AlternativeTypesOffsets.emplace_back();
+      altTyReader.readEntries(i, result.AlternativeTypesOffsets.back());
     }
     return result;
   }
@@ -95,6 +108,7 @@ public:
     APPLY(KeyExpressionLength, Int, result.ExprLength);
     APPLY(KeyExpressionType, String, reader.readPrintedType(result.TypeOffset));
     APPLY_ARRAY(ProtocolName, KeyExpectedTypes);
+    APPLY_ARRAY(AlternativeExpressionType, KeyAlternativeTypes);
     return true;
   }
 };
@@ -125,7 +139,6 @@ struct ProtocolListFuncs {
 
   static VariantFunctions Funcs;
 };
-}// end of anonymous namespace
 
 VariantFunctions ProtocolListFuncs::Funcs = {
   get_type,
@@ -151,12 +164,69 @@ VariantFunctions ProtocolListFuncs::Funcs = {
   nullptr /*Annot_data_get_ptr*/,
 };
 
+// data[0] = ProtocolListFuncs::funcs
+// data[1] = custom buffer
+// data[2] = offset for the element in ExpressionTypeArray
+struct AlternativeTypeListFuncs {
+  static sourcekitd_variant_type_t get_type(sourcekitd_variant_t var) {
+    return SOURCEKITD_VARIANT_TYPE_ARRAY;
+  }
+
+  static size_t array_get_count(sourcekitd_variant_t array) {
+    char *buffer = (char *)array.data[1];
+    size_t offset = array.data[2];
+    return ExpressionTypeReader(buffer)
+        .getExpression(offset)
+        .AlternativeTypesOffsets.size();
+  }
+
+  static sourcekitd_variant_t array_get_value(sourcekitd_variant_t array,
+                                              size_t index) {
+    char *buffer = (char *)array.data[1];
+    size_t offset = array.data[2];
+    ExpressionTypeReader reader(buffer);
+    return makeStringVariant(reader.readPrintedType(
+        (reader.getExpression(offset).AlternativeTypesOffsets[index])));
+  }
+
+  static VariantFunctions Funcs;
+};
+
+VariantFunctions AlternativeTypeListFuncs::Funcs = {
+    get_type,
+    nullptr /*AnnotArray_array_apply*/,
+    nullptr /*AnnotArray_array_get_bool*/,
+    array_get_count,
+    nullptr /*AnnotArray_array_get_int64*/,
+    nullptr /*AnnotArray_array_get_string*/,
+    nullptr /*AnnotArray_array_get_uid*/,
+    array_get_value,
+    nullptr /*AnnotArray_bool_get_value*/,
+    nullptr /*AnnotArray_dictionary_apply*/,
+    nullptr /*AnnotArray_dictionary_get_bool*/,
+    nullptr /*AnnotArray_dictionary_get_int64*/,
+    nullptr /*AnnotArray_dictionary_get_string*/,
+    nullptr /*AnnotArray_dictionary_get_value*/,
+    nullptr /*AnnotArray_dictionary_get_uid*/,
+    nullptr /*AnnotArray_string_get_length*/,
+    nullptr /*AnnotArray_string_get_ptr*/,
+    nullptr /*AnnotArray_int64_get_value*/,
+    nullptr /*AnnotArray_uid_get_value*/,
+    nullptr /*Annot_data_get_size*/,
+    nullptr /*Annot_data_get_ptr*/,
+};
+
+} // end of anonymous namespace
+
 struct ExpressionTypeArrayBuilder::Implementation {
   StringRef printedType;
   SmallVector<char, 256> buffer;
-  CompactArrayBuilder<unsigned, unsigned, unsigned, unsigned, unsigned> builder;
+  CompactArrayBuilder<unsigned, unsigned, unsigned, unsigned, unsigned,
+                      unsigned, unsigned>
+      builder;
   CompactArrayBuilder<StringRef> strBuilder;
   CompactArrayBuilder<unsigned> protoBuilder;
+  CompactArrayBuilder<unsigned> alternativeTypesBuilder;
 
   Implementation(StringRef PrintedType) { strBuilder.addEntry(PrintedType); }
   static sourcekitd_variant_type_t get_type(sourcekitd_variant_t var) {
@@ -177,8 +247,8 @@ struct ExpressionTypeArrayBuilder::Implementation {
   }
 
   std::unique_ptr<llvm::MemoryBuffer> createBuffer(CustomBufferKind Kind) {
-    std::array<CompactArrayBuilderImpl*, 3> builders =
-      {&builder, &strBuilder, &protoBuilder};
+    std::array<CompactArrayBuilderImpl *, 4> builders = {
+        &builder, &strBuilder, &protoBuilder, &alternativeTypesBuilder};
     auto kindSize = sizeof(uint64_t);
     size_t headerSize = sizeof(uint64_t) * builders.size();
     auto allSize = kindSize + headerSize;
@@ -212,16 +282,27 @@ ExpressionTypeArrayBuilder::~ExpressionTypeArrayBuilder() {
 }
 
 void ExpressionTypeArrayBuilder::add(const ExpressionType &expType) {
-  auto protoStart = Impl.protoBuilder.size();
   // Add protocol name starts and length to the protocol buffer.
+  auto protoStart = Impl.protoBuilder.size();
   for (auto off: expType.ProtocolOffsets) {
     Impl.protoBuilder.addEntry(off);
   }
   auto protoCount = Impl.protoBuilder.size() - protoStart;
-  Impl.builder.addEntry(expType.ExprOffset, expType.ExprLength,
-                        expType.TypeOffset/*Printed type is null ended*/,
-                        protoStart/*Index of first protocol in the protocol buffer*/,
-                        protoCount/*Number of conforming protocols*/);
+
+  // Add alternative type name starts and length to the alternative type buffer.
+  auto altTyStart = Impl.alternativeTypesBuilder.size();
+  for (auto off : expType.AlternativeTypesOffsets) {
+    Impl.alternativeTypesBuilder.addEntry(off);
+  }
+  auto altTyCount = Impl.alternativeTypesBuilder.size() - altTyStart;
+
+  Impl.builder.addEntry(
+      expType.ExprOffset, expType.ExprLength,
+      expType.TypeOffset /*Printed type is null ended*/,
+      protoStart /*Index of first protocol in the protocol buffer*/,
+      protoCount /*Number of conforming protocols*/,
+      altTyStart /*Index of first alternative type in the alternative buffer*/,
+      altTyCount /*Number of alternative types*/);
 }
 
 std::unique_ptr<llvm::MemoryBuffer>
@@ -261,4 +342,9 @@ sourcekitd::getVariantFunctionsForExpressionTypeArray() {
 VariantFunctions *
 sourcekitd::getVariantFunctionsForProtocolNameArray() {
   return &ProtocolListFuncs::Funcs;
+}
+
+VariantFunctions *
+sourcekitd::getVariantFunctionsForAlternativeExpressionTypeArray() {
+  return &AlternativeTypeListFuncs::Funcs;
 }

@@ -2914,9 +2914,13 @@ void SwiftLangSupport::collectExpressionTypes(
       for (auto Item :
            collectExpressionType(*SF, ExpectedProtocols, Scratch,
                                  FullyQualified, CanonicalType, OS)) {
-        Result.Results.push_back({Item.offset, Item.length, Item.typeOffset, {}});
+        Result.Results.push_back(
+            {Item.offset, Item.length, Item.typeOffset, {}, {}});
         for (auto P: Item.protocols) {
           Result.Results.back().ProtocolOffsets.push_back(P.first);
+        }
+        for (auto AltTy : Item.alternativeTypes) {
+          Result.Results.back().AlternativeTypesOffsets.push_back(AltTy.first);
         }
       }
       Result.TypeBuffer = OS.str();

@@ -27,11 +27,13 @@
 #include "swift/AST/Types.h"
 #include "swift/Sema/IDETypeChecking.h"
 #include "swift/Sema/IDETypeCheckingRequests.h"
+#include "swift/Sema/ConstraintSystem.h"
 #include "swift/IDE/SourceEntityWalker.h"
 #include "swift/IDE/IDERequests.h"
 #include "swift/Parse/Lexer.h"
 
 using namespace swift;
+using namespace swift::constraints;
 
 void
 swift::getTopLevelDeclsForDisplay(ModuleDecl *M,
@@ -654,18 +656,21 @@ class ExpressionTypeCollector: public SourceEntityWalker {
   // these protocols.
   llvm::MapVector<ProtocolDecl*, StringRef> &InterestedProtocols;
 
+  //
+  llvm::DenseMap<Expr *, llvm::SmallVector<Type, 8>> AlternativeTypesCache;
+
   // Specified by the client whether we should print fully qualified types
   const bool FullyQualified;
 
   // Specified by the client whether we should canonicalize types before printing
   const bool CanonicalType;
 
+  // Current DeclContext
+  DeclContext *DC = nullptr;
+
   bool shouldReport(unsigned Offset, unsigned Length, Expr *E,
                     std::vector<StringRef> &Conformances) {
     assert(Conformances.empty());
-    // We shouldn't report null types.
-    if (E->getType().isNull())
-      return false;
 
     // If we have already reported types for this source range, we shouldn't
     // report again. This makes sure we always report the outtermost type of
@@ -701,6 +706,46 @@ class ExpressionTypeCollector: public SourceEntityWalker {
     return {TypeOffsets[PrintedType], PrintedType.size()};
   }
 
+  llvm::ArrayRef<Type> getAlternativeTypes(Expr *E) {
+    if (AlternativeTypesCache.count(E)) {
+      return AlternativeTypesCache[E];
+    }
+
+    // Create a target from the expression without a context type
+    SyntacticElementTarget target(E, DC, CTP_Unused, Type(), true);
+
+    // Try to type check the target
+    ConstraintSystemOptions options =
+        ConstraintSystemFlags::AllowUnresolvedTypeVariables;
+    ConstraintSystem cs(DC, options);
+    auto Solutions = cs.solve(target, FreeTypeVariableBinding::Disallow);
+    if (!Solutions.has_value() || Solutions->empty()) {
+      return {};
+    }
+
+    // Enumerate possible types from all solutions. Considers sub-expressions as
+    // well.
+    std::for_each(
+        Solutions->begin(), Solutions->end(), [&](const Solution &Sol) {
+          for (auto &[Node, Ty] : Sol.nodeTypes) {
+            Expr *ExprNode = getAsExpr(Node);
+            if (!ExprNode) {
+              continue;
+            }
+            // Do not collect alternative types for correctly type
+            // checked nodes
+            Type TyFromAST = ExprNode->getType();
+            if (!TyFromAST.isNull() && !TyFromAST->is<ErrorType>()) {
+              continue;
+            }
+            Type SimpleTy =
+                Sol.simplifyType(Sol.getType(ExprNode))->getRValueType();
+            AlternativeTypesCache[ExprNode].push_back(SimpleTy);
+          }
+        });
+
+    return AlternativeTypesCache[target.getAsExpr()];
+  }
 
 public:
   ExpressionTypeCollector(
@@ -712,6 +757,12 @@ public:
         BufferId(*SF.getBufferID()), Results(Results), OS(OS),
         InterestedProtocols(InterestedProtocols),
         FullyQualified(FullyQualified), CanonicalType(CanonicalType) {}
+
+  bool walkToDeclPre(Decl *D, CharSourceRange range) override {
+    DC = D->getDeclContext();
+    return true;
+  }
+
   bool walkToExprPre(Expr *E) override {
     if (E->getSourceRange().isInvalid())
       return true;
@@ -722,11 +773,25 @@ public:
     std::vector<StringRef> Conformances;
     if (!shouldReport(Offset, Length, E, Conformances))
       return true;
-    // Print the type to a temporary buffer.
-    SmallString<64> Buffer;
-    {
+
+    Type Ty;
+    if (E->getType().isNull()) {
+      Ty = ErrorType::get(DC->getASTContext());
+    } else {
+      Ty = E->getType()->getRValueType();
+    }
+
+    // For expressions with a type error we try to gather possible alternative
+    // types by type checking the expression without the context type
+    llvm::ArrayRef<Type> AlternativeTypes;
+    if (Ty.isNull() || Ty->is<ErrorType>()) {
+      AlternativeTypes = getAlternativeTypes(E);
+    }
+
+    // Prints the type to a temporary buffer. Clears the buffer first.
+    auto printType = [&](Type Ty, SmallString<64> &Buffer) {
+      Buffer.clear();
       llvm::raw_svector_ostream OS(Buffer);
-      auto Ty = E->getType()->getRValueType();
       PrintOptions printOptions = PrintOptions();
       printOptions.FullyQualifiedTypes = FullyQualified;
       if (CanonicalType) {
@@ -734,15 +799,28 @@ public:
       } else {
         Ty->reconstituteSugar(true)->print(OS, printOptions);
       }
-    }
-    auto Ty = getTypeOffsets(Buffer.str());
+    };
+
+    SmallString<64> Buffer;
+
     // Add the type information to the result list.
-    Results.push_back({Offset, Length, Ty.first, Ty.second, {}});
+    printType(Ty, Buffer);
+    auto TyOffset = getTypeOffsets(Buffer.str());
+    Results.push_back(
+        {Offset, Length, TyOffset.first, TyOffset.second, {}, {}});
 
     // Adding all protocol names to the result.
     for(auto Con: Conformances) {
-      auto Ty = getTypeOffsets(Con);
-      Results.back().protocols.push_back({Ty.first, Ty.second});
+      auto TyOffset = getTypeOffsets(Con);
+      Results.back().protocols.push_back({TyOffset.first, TyOffset.second});
+    }
+
+    // Add alternative types to the result
+    for (Type AltTy : AlternativeTypes) {
+      printType(AltTy, Buffer);
+      auto TyOffset = getTypeOffsets(Buffer.str());
+      Results.back().alternativeTypes.push_back(
+          {TyOffset.first, TyOffset.second});
     }
 
     // Keep track of that we have a type reported for this range.

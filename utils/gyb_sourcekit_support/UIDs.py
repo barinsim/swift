@@ -174,6 +174,7 @@ UID_KEYS = [
     KEY('CompilerArgsString', 'key.compilerargs-string'),
     KEY('ImplicitMembers', 'key.implicitmembers'),
     KEY('ExpectedTypes', 'key.expectedtypes'),
+    KEY('AlternativeTypes', 'key.alternativetypes'),
     KEY('Members', 'key.members'),
     KEY('TypeBuffer', 'key.printedtypebuffer'),
     KEY('ExpressionTypeList', 'key.expression_type_list'),

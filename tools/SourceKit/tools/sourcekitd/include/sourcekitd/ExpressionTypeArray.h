@@ -22,6 +22,7 @@ namespace SourceKit {
 namespace sourcekitd {
 VariantFunctions *getVariantFunctionsForExpressionTypeArray();
 VariantFunctions *getVariantFunctionsForProtocolNameArray();
+VariantFunctions *getVariantFunctionsForAlternativeExpressionTypeArray();
 
 class ExpressionTypeArrayBuilder {
 public:

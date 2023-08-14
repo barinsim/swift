@@ -2159,6 +2159,13 @@ static void printExpressionType(sourcekitd_variant_t Info, llvm::raw_ostream &OS
     for (unsigned i = 0; i != Count; i ++) {
       OS << "conforming to: " << sourcekitd_variant_array_get_string(protocols, i) << "\n";
     }
+    sourcekitd_variant_t altTypes =
+        sourcekitd_variant_dictionary_get_value(Item, KeyAlternativeTypes);
+    Count = sourcekitd_variant_array_get_count(altTypes);
+    for (unsigned i = 0; i != Count; i++) {
+      OS << "alternative: " << sourcekitd_variant_array_get_string(altTypes, i)
+         << "\n";
+    }
   }
   OS << "</ExpressionTypes>\n";
 }

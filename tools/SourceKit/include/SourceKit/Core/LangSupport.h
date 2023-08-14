@@ -126,6 +126,7 @@ struct ExpressionType {
   unsigned ExprLength;
   unsigned TypeOffset;
   std::vector<unsigned> ProtocolOffsets;
+  std::vector<unsigned> AlternativeTypesOffsets;
 };
 
 struct ExpressionTypesInFile {

@@ -230,6 +230,10 @@ namespace swift {
 
     /// The offsets and lengths of all protocols the type conforms to
     std::vector<std::pair<uint32_t, uint32_t>> protocols;
+
+    /// The offsets and lengths of all alternative types.
+    /// Non-empty for expressions which could not be type checked.
+    std::vector<std::pair<uint32_t, uint32_t>> alternativeTypes;
   };
 
   /// Collect type information for every expression in \c SF; all types will
