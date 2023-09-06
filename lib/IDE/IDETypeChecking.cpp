@@ -711,13 +711,21 @@ class ExpressionTypeCollector: public SourceEntityWalker {
       return AlternativeTypesCache[E];
     }
 
-    // Create a target from the expression without a context type
+    // Create target from the expression without a context type
     SyntacticElementTarget target(E, DC, CTP_Unused, Type(), true);
 
-    // Try to type check the target
+    // Create constraint solver
     ConstraintSystemOptions options =
         ConstraintSystemFlags::AllowUnresolvedTypeVariables;
     ConstraintSystem cs(DC, options);
+    cs.setContextualInfo(E, target.getExprContextualTypeInfo());
+
+    // Reset the expression type. Constraint solver must get untyped expression.
+    Type originalTy = E->getType();
+    SWIFT_DEFER{ E->setType(originalTy); };
+    E->setType(Type());
+
+    // Try to type check the expression
     auto Solutions = cs.solve(target, FreeTypeVariableBinding::Disallow);
     if (!Solutions.has_value() || Solutions->empty()) {
       return {};
@@ -732,12 +740,14 @@ class ExpressionTypeCollector: public SourceEntityWalker {
             if (!ExprNode) {
               continue;
             }
+
             // Do not collect alternative types for correctly type
             // checked nodes
             Type TyFromAST = ExprNode->getType();
             if (!TyFromAST.isNull() && !TyFromAST->is<ErrorType>()) {
               continue;
             }
+
             Type SimpleTy =
                 Sol.simplifyType(Sol.getType(ExprNode))->getRValueType();
             AlternativeTypesCache[ExprNode].push_back(SimpleTy);
